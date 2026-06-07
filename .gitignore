@@ -1,0 +1,17 @@
+*.safetensors
+*.bin
+*.pt
+*.pth
+qwen2.5-vl-*/
+*-Instruct/
+*.annotated.jpg
+annotations.json
+download_*.log
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+.DS_Store
+.vscode/
+.cursor/
