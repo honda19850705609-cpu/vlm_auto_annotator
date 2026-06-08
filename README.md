@@ -14,14 +14,15 @@ aggregated JSON with run-level statistics.
 ```
 vlm_auto_annotator/
 ├── minimal_vlm.py      # Day 1 — single image, free-form text output
-├── vlm_structured.py   # Day 2 — single image, structured JSON + parsing
-├── structured_vlm.py   # Day 4 — main pipeline: bbox rescale + batch export
+├── structured_vlm.py   # Day 2+4 — main pipeline: structured JSON, bbox rescale, batch export
+├── to_coco.py          # Day 6 — convert batch JSON to COCO (pycocotools-verified)
 ├── requirements.txt
 ├── devlog/             # daily notes (environment, bugs, design decisions)
 │   ├── day1_2026-06-05.md
 │   ├── day2.md
 │   ├── day3.md         # DINO-DETR / ONNX track (separate small-model path)
-│   └── day4.md
+│   ├── day4.md
+│   └── day6.md         # end-to-end VLM -> COCO closure
 └── README.md
 ```
 
@@ -30,16 +31,17 @@ Scripts build on each other:
 | Script | What it adds |
 |--------|--------------|
 | `minimal_vlm.py` | Load Qwen2.5-VL, run one image, print description + latency/VRAM |
-| `vlm_structured.py` | Force JSON detections; multi-layer `extract_json` + validation |
-| `structured_vlm.py` | Rescale bboxes to original pixels; batch folder; fault tolerance |
+| `structured_vlm.py` | Force JSON detections (multi-layer `extract_json` + validation); rescale bboxes to original pixels; batch a folder with per-image fault tolerance |
+| `to_coco.py` | Convert the batch JSON to a standard COCO detection file; verify it loads with `pycocotools` |
 
-Use **`structured_vlm.py`** for production-style auto-annotation. The earlier
-scripts are kept as stepping stones and for debugging.
+Use **`structured_vlm.py`** for production-style auto-annotation, then
+**`to_coco.py`** to hand the result to downstream COCO tooling. `minimal_vlm.py`
+is kept as a stepping stone and for debugging.
 
 ## What it does
 
 ```
-image folder  ->  Qwen2.5-VL  ->  structured JSON  ->  downstream / triage
+image folder  ->  Qwen2.5-VL  ->  structured JSON  ->  COCO  ->  downstream / triage
 ```
 
 - **Structured output.** Prompts the model for a strict JSON array
@@ -79,18 +81,7 @@ python minimal_vlm.py \
     --image /path/to/test.jpg
 ```
 
-### Day 2 — single image, structured JSON
-
-```bash
-python vlm_structured.py \
-    --model /path/to/qwen2.5-vl-7b \
-    --image /path/to/test.jpg \
-    --out output.json
-```
-
-Writes parsed detections to `output.json` and prints parse/validation stats.
-
-### Day 4 — main pipeline (recommended)
+### Main pipeline — structured JSON (recommended)
 
 Single image first, to visually verify boxes are placed correctly:
 
@@ -102,7 +93,8 @@ python structured_vlm.py \
     --max-new-tokens 4096
 ```
 
-This writes `test.annotated.jpg` next to the input with boxes drawn on it.
+This prints the parsed detections and writes `test.annotated.jpg` next to the
+input with boxes drawn on it, so you can eyeball that the rescaling is correct.
 
 Then a whole folder:
 
@@ -116,6 +108,21 @@ python structured_vlm.py \
 
 `--model` accepts either a local model directory or a HuggingFace repo id.
 Use `--debug` in batch mode to print per-image resize info and raw model text.
+
+### Convert to COCO
+
+Turn the batch output into a standard COCO detection file and verify it loads:
+
+```bash
+python to_coco.py \
+    --in annotations.json \
+    --images /path/to/images/ \
+    --out coco.json \
+    --verify
+```
+
+`--verify` runs a `pycocotools` load check (instantiates `COCO()`, reads back
+categories / images / annotations) as an end-to-end correctness bar.
 
 ## Output format
 
@@ -146,8 +153,8 @@ A failed image appears as `{"error": "..."}` under its filename.
 ## Dev log
 
 See `devlog/` for day-by-day notes: environment setup, parsing pitfalls, bbox
-rescaling verification, batch hardening, and (Day 3) the parallel DINO-DETR /
-ONNX export track on VisDrone.
+rescaling verification, batch hardening, the end-to-end COCO closure (Day 6),
+and (Day 3) the parallel DINO-DETR / ONNX export track on VisDrone.
 
 ## Notes & limitations
 

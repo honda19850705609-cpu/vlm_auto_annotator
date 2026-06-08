@@ -3,3 +3,4 @@ transformers==5.9.0
 accelerate
 qwen-vl-utils==0.0.14
 pillow
+pycocotools  # to_coco.py --verify
