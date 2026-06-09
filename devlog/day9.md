@@ -81,15 +81,41 @@ scored ~0 TP; 1110 GT boxes after core-class filtering):
 3. **Recall–precision tradeoff:** every recall gain cost some precision (FP from edge
    duplicates + hallucinations).
 
-## Full-val headline (109 images) — TO FILL after the full v3 run
+## Full-val headline (109 images, 7971 core-class GT boxes)
 
-| | integral VLM | tiled v3 |
-|---|---|---|
-| overall recall | 0.045 | _TBD_ |
-| recall 16–32px | 0.024 | _TBD_ |
-| recall <8px | 0.004 | _TBD_ |
+The full-val run confirms the smoke trend at scale, and more strongly: **recall up
+5.4× while precision holds flat.**
 
-(_run `tiled_vlm.py` on all 109 → `to_coco.py` → `badcase.py` vs full GT, paste here._)
+| metric | integral VLM | **tiled v3** | gain |
+|---|---|---|---|
+| overall precision | 0.538 | 0.544 | **flat** (no precision cost) |
+| overall recall | 0.045 | **0.243** | **5.4×** |
+| overall F1 | 0.082 | **0.336** | 4.1× |
+| TP / FP / FN | 355 / 305 / 7616 | 1940 / 1626 / 6031 | +1585 TP |
+| recall <8px | 0.004 | 0.015 | 3.8× |
+| recall 8–16px | 0.005 | **0.100** | **20×** |
+| recall 16–32px | 0.024 | **0.255** | **10.6×** |
+| recall 32–96px | 0.092 | 0.391 | 4.3× |
+| recall ≥96px | 0.324 | 0.476 | 1.5× |
+| pedestrian recall | 0.008 | **0.300** | **37×** |
+| vehicle recall | 0.085 | 0.265 | 3.1× |
+
+**The headline observation:** the gain is *inversely proportional to object size* —
+1.5× for ≥96px, but 20× for 8–16px. Tiling adds recall exactly where the integral
+VLM collapsed (small objects), and **precision stays flat (0.538 → 0.544)** despite
+5.4× more true positives, because the class whitelist + giant-box filter suppress the
+scenery/mislabel noise that more detections would otherwise introduce. Run time:
+5814s (~1.6h) for 109 images at 23 tiles/image.
+
+### Two residual effects worth noting
+
+1. **Tile-level truncation still happens.** On the densest tiles the per-tile JSON
+   still overflows `max_new_tokens` (the salvage path fires, "salvaged N complete
+   objects"). So the token ceiling is *fundamental*, not fully solved — finer tiles or
+   higher `max_new_tokens` could push recall further.
+2. **23 / 109 images returned zero detections** (GT∩VLM = 86). Their GT counts as pure
+   FN, so the *effective* recall on non-empty images is higher than 0.243 — fixing the
+   empty-image failure mode is the most promising next lever.
 
 ## Output
 
