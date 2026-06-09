@@ -50,9 +50,47 @@ from structured_vlm import (
     resized_hw,
     extract_json,
     rescale_and_validate,
-    JSON_PROMPT,
     IMG_EXTS,
 )
+
+
+# ---------------------------------------------------------------------------
+# v2 改进:类别约束 + 反幻觉 prompt(替代 structured_vlm 的通用 JSON_PROMPT)。
+# smoke 暴露的问题:VLM 标 building/road/trees 等场景元素、把整块当成一个
+# 巨大的 "pedestrian/car"、还编出等距的竖列假框。这里从源头掐住。
+# ---------------------------------------------------------------------------
+VISDRONE_PROMPT = (
+    "This is an aerial / drone-view image. Detect EVERY individual small object. "
+    "Use ONLY these exact labels: "
+    "pedestrian, person, car, van, truck, bus, bicycle, tricycle, motor. "
+    "Do NOT label scenery such as building, road, street, tree, sky, parking lot, "
+    "billboard — ignore them completely. "
+    "Each bounding box must tightly enclose exactly ONE object. "
+    "Do NOT merge several objects into one big box. "
+    "Do NOT invent evenly-spaced or repeated boxes. "
+    "Respond with ONLY a JSON array, no prose, no markdown fences. "
+    "Each element: "
+    '{"label": one of the allowed labels, '
+    '"bbox": [x1, y1, x2, y2] in absolute pixel integers, '
+    '"confidence": 0.0-1.0}. '
+    "If you see no such object, respond with []."
+)
+
+# 即使模型不听话,也用白名单兜底过滤掉非目标类(含简单的复数归一)。
+ALLOWED_LABELS = {
+    "pedestrian", "person", "people", "car", "van", "truck", "bus",
+    "bicycle", "bike", "tricycle", "motor", "motorcycle", "motorbike",
+}
+
+
+def normalize_label(label):
+    """小写、去复数;返回白名单内的标签,否则 None(=丢弃)。"""
+    s = str(label).strip().lower()
+    if s in ALLOWED_LABELS:
+        return s
+    if s.endswith("s") and s[:-1] in ALLOWED_LABELS:  # cars -> car
+        return s[:-1]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +159,7 @@ def nms_per_label(dets, iou_thr):
 # ---------------------------------------------------------------------------
 # 单块推理:与 structured_vlm.infer_one 同逻辑,但吃 PIL 子图而非路径。
 # ---------------------------------------------------------------------------
-def infer_pil(model, processor, pil_img, max_new_tokens=1024):
+def infer_pil(model, processor, pil_img, prompt, max_new_tokens=1024):
     orig_w, orig_h = pil_img.size
     res_h, res_w = resized_hw(processor, orig_h, orig_w)
 
@@ -129,7 +167,7 @@ def infer_pil(model, processor, pil_img, max_new_tokens=1024):
         "role": "user",
         "content": [
             {"type": "image", "image": pil_img},
-            {"type": "text", "text": JSON_PROMPT},
+            {"type": "text", "text": prompt},
         ],
     }]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -155,26 +193,58 @@ def infer_pil(model, processor, pil_img, max_new_tokens=1024):
 
 
 def infer_one_tiled(model, processor, image_path, tile_size, overlap,
-                    nms_iou, max_new_tokens, debug=False):
-    """对一张整图做切图推理,返回拼回原图坐标 + 去重后的检测列表。"""
+                    nms_iou, max_new_tokens, upscale=2.0, max_box_frac=0.5,
+                    debug=False):
+    """对一张整图做切图推理,返回拼回原图坐标 + 去重后的检测列表。
+
+    v2 三项改进:
+      - upscale:每个切块先放大 upscale 倍再喂,等效再放大微小目标;
+                 模型空间坐标先除以 upscale 还原到块坐标,再加块偏移。
+      - max_box_frac:丢弃面积 > 块面积 * max_box_frac 的框(干掉"整块当一物"的巨框)。
+      - normalize_label:白名单过滤,非 VisDrone 目标类直接丢。
+    """
     image = Image.open(image_path).convert("RGB")
     W, H = image.size
     tiles = make_tiles(W, H, tile_size, overlap)
 
+    n_label_drop = n_big_drop = 0
     all_dets = []
     for (x0, y0, x1, y1) in tiles:
+        tw, th = x1 - x0, y1 - y0
         crop = image.crop((x0, y0, x1, y1))
-        dets = infer_pil(model, processor, crop, max_new_tokens)
-        # 块内坐标 -> 全图坐标:加上块左上角偏移
+        if upscale and upscale != 1.0:
+            crop_fed = crop.resize((max(1, int(tw * upscale)),
+                                    max(1, int(th * upscale))))
+        else:
+            crop_fed = crop
+        dets = infer_pil(model, processor, crop_fed, VISDRONE_PROMPT, max_new_tokens)
+
+        tile_area = float(tw * th)
         for d in dets:
+            label = normalize_label(d["label"])
+            if label is None:                      # 非目标类:丢
+                n_label_drop += 1
+                continue
             bx1, by1, bx2, by2 = d["bbox"]
-            d["bbox"] = [round(bx1 + x0, 1), round(by1 + y0, 1),
-                         round(bx2 + x0, 1), round(by2 + y0, 1)]
-            all_dets.append(d)
+            # 放大空间 -> 块空间
+            if upscale and upscale != 1.0:
+                bx1, by1, bx2, by2 = (bx1 / upscale, by1 / upscale,
+                                      bx2 / upscale, by2 / upscale)
+            if (bx2 - bx1) * (by2 - by1) > max_box_frac * tile_area:  # 巨框:丢
+                n_big_drop += 1
+                continue
+            # 块空间 -> 全图空间
+            all_dets.append({
+                "label": label,
+                "bbox": [round(bx1 + x0, 1), round(by1 + y0, 1),
+                         round(bx2 + x0, 1), round(by2 + y0, 1)],
+                "confidence": d.get("confidence", 0.0),
+            })
 
     merged = nms_per_label(all_dets, nms_iou)
     if debug:
-        print(f"    tiles={len(tiles)}  raw={len(all_dets)}  after_nms={len(merged)}")
+        print(f"    tiles={len(tiles)}  kept={len(all_dets)}  "
+              f"(label_drop={n_label_drop} big_drop={n_big_drop})  after_nms={len(merged)}")
     return merged
 
 
@@ -184,8 +254,8 @@ def run(args, model, processor):
     if not images:
         print(f">>> no images found in {img_dir}")
         return
-    print(f">>> found {len(images)} images; "
-          f"tile={args.tile_size} overlap={args.overlap} nms_iou={args.nms_iou}")
+    print(f">>> found {len(images)} images; tile={args.tile_size} overlap={args.overlap} "
+          f"nms_iou={args.nms_iou} upscale={args.upscale} max_box_frac={args.max_box_frac}")
 
     results = {}
     n_ok = n_fail = n_dets = 0
@@ -197,6 +267,7 @@ def run(args, model, processor):
                 model, processor, str(path),
                 tile_size=args.tile_size, overlap=args.overlap,
                 nms_iou=args.nms_iou, max_new_tokens=args.max_new_tokens,
+                upscale=args.upscale, max_box_frac=args.max_box_frac,
                 debug=args.debug,
             )
             results[path.name] = dets
@@ -214,6 +285,8 @@ def run(args, model, processor):
         "tile_size": args.tile_size,
         "overlap": args.overlap,
         "nms_iou": args.nms_iou,
+        "upscale": args.upscale,
+        "max_box_frac": args.max_box_frac,
         "num_images": len(images),
         "num_ok": n_ok,
         "num_failed": n_fail,
@@ -237,11 +310,18 @@ def parse_args():
                    help="local model dir or HuggingFace repo id")
     p.add_argument("--image-dir", required=True, help="folder of images")
     p.add_argument("--out", default="annotations_tiled.json", help="output JSON path")
-    p.add_argument("--tile-size", type=int, default=640, help="tile edge in px (default 640)")
+    p.add_argument("--tile-size", type=int, default=512,
+                   help="tile edge in px (default 512; smaller = more magnification)")
     p.add_argument("--overlap", type=float, default=0.2,
                    help="fractional tile overlap 0~0.5 (default 0.2)")
     p.add_argument("--nms-iou", type=float, default=0.55,
                    help="cross-tile dedupe IoU threshold (default 0.55)")
+    p.add_argument("--upscale", type=float, default=2.0,
+                   help="enlarge each tile by this factor before inference (default 2.0; "
+                        "1.0 disables). Magnifies tiny objects for the model.")
+    p.add_argument("--max-box-frac", type=float, default=0.5,
+                   help="drop boxes larger than this fraction of the tile area "
+                        "(default 0.5; kills whole-region mislabels)")
     p.add_argument("--max-new-tokens", type=int, default=1024)
     p.add_argument("--debug", action="store_true",
                    help="print per-image tile / raw / nms counts")
