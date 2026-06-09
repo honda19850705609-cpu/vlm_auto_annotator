@@ -6,7 +6,12 @@ qwen2.5-vl-*/
 *-Instruct/
 *.annotated.jpg
 annotations.json
-download_*.log
+annotations_tiled*.json
+*_coco.json
+coco.json
+visdrone_val_gt*.json
+instances_*.json
+*.log
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

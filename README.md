@@ -19,6 +19,7 @@ vlm_auto_annotator/
 ├── badcase.py          # Day 9 — GT-anchored eval: P/R/F1 + per-size recall + badcase ranking
 ├── tiled_vlm.py        # Day 11 — multi-scale tiling inference (beats the token ceiling)
 ├── requirements.txt
+├── results/            # full-val eval reports (integral baseline vs tiled v3)
 ├── devlog/             # daily notes (environment, bugs, design decisions)
 │   ├── day1_2026-06-05.md
 │   ├── day2.md
