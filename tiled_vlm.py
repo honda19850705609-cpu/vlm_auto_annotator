@@ -192,23 +192,43 @@ def infer_pil(model, processor, pil_img, prompt, max_new_tokens=1024):
     return rescale_and_validate(raw, orig_h, orig_w, res_h, res_w)
 
 
-def infer_one_tiled(model, processor, image_path, tile_size, overlap,
-                    nms_iou, max_new_tokens, upscale=2.0, max_box_frac=0.5,
-                    debug=False):
-    """对一张整图做切图推理,返回拼回原图坐标 + 去重后的检测列表。
+def parse_scales(spec, fallback_tile, fallback_upscale):
+    """把 "640:1.0,512:2.0" 解析成 [(640,1.0),(512,2.0)]。
 
-    v2 三项改进:
-      - upscale:每个切块先放大 upscale 倍再喂,等效再放大微小目标;
-                 模型空间坐标先除以 upscale 还原到块坐标,再加块偏移。
+    空字符串 -> 退回单尺度 [(fallback_tile, fallback_upscale)]。
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return [(int(fallback_tile), float(fallback_upscale))]
+    out = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" in chunk:
+            t, u = chunk.split(":", 1)
+            out.append((int(t), float(u)))
+        else:
+            out.append((int(chunk), 1.0))
+    if not out:
+        return [(int(fallback_tile), float(fallback_upscale))]
+    return out
+
+
+def _detect_at_scale(model, processor, image, tile_size, overlap, upscale,
+                     max_new_tokens, max_box_frac):
+    """单一尺度的切图检测,返回 (全图坐标的检测列表, 块数, label_drop, big_drop)。
+
+    本函数不做最终 NMS —— 留给调用方对(可能多尺度的)并集统一去重。
+      - upscale:每个切块先放大 upscale 倍再喂,等效放大微小目标;
+                 模型空间坐标除以 upscale 还原到块坐标,再加块偏移。
       - max_box_frac:丢弃面积 > 块面积 * max_box_frac 的框(干掉"整块当一物"的巨框)。
       - normalize_label:白名单过滤,非 VisDrone 目标类直接丢。
     """
-    image = Image.open(image_path).convert("RGB")
     W, H = image.size
     tiles = make_tiles(W, H, tile_size, overlap)
-
     n_label_drop = n_big_drop = 0
-    all_dets = []
+    dets_out = []
     for (x0, y0, x1, y1) in tiles:
         tw, th = x1 - x0, y1 - y0
         crop = image.crop((x0, y0, x1, y1))
@@ -226,25 +246,41 @@ def infer_one_tiled(model, processor, image_path, tile_size, overlap,
                 n_label_drop += 1
                 continue
             bx1, by1, bx2, by2 = d["bbox"]
-            # 放大空间 -> 块空间
-            if upscale and upscale != 1.0:
+            if upscale and upscale != 1.0:         # 放大空间 -> 块空间
                 bx1, by1, bx2, by2 = (bx1 / upscale, by1 / upscale,
                                       bx2 / upscale, by2 / upscale)
             if (bx2 - bx1) * (by2 - by1) > max_box_frac * tile_area:  # 巨框:丢
                 n_big_drop += 1
                 continue
-            # 块空间 -> 全图空间
-            all_dets.append({
+            dets_out.append({                      # 块空间 -> 全图空间
                 "label": label,
                 "bbox": [round(bx1 + x0, 1), round(by1 + y0, 1),
                          round(bx2 + x0, 1), round(by2 + y0, 1)],
                 "confidence": d.get("confidence", 0.0),
             })
+    return dets_out, len(tiles), n_label_drop, n_big_drop
 
-    merged = nms_per_label(all_dets, nms_iou)
+
+def infer_one_multiscale(model, processor, image_path, scales, overlap,
+                         nms_iou, max_new_tokens, max_box_frac, debug=False):
+    """多尺度切图:对每个 (tile, upscale) 跑一遍,并集后统一 NMS 去重。
+
+    v3 动机:smoke 显示 640px(无上采样)擅长 32-96px 中目标,而 512px+2x 上采样
+    擅长 8-32px 小目标,二者互补。多尺度并集同时拿到两段,并用粗尺度兜回细尺度
+    打空的图。
+    """
+    image = Image.open(image_path).convert("RGB")
+    union = []
+    info = []
+    for (ts, up) in scales:
+        dets, n_tiles, ld, bd = _detect_at_scale(
+            model, processor, image, ts, overlap, up, max_new_tokens, max_box_frac)
+        union.extend(dets)
+        info.append(f"{ts}px@{up}x(tiles={n_tiles},kept={len(dets)},ldrop={ld},bdrop={bd})")
+
+    merged = nms_per_label(union, nms_iou)
     if debug:
-        print(f"    tiles={len(tiles)}  kept={len(all_dets)}  "
-              f"(label_drop={n_label_drop} big_drop={n_big_drop})  after_nms={len(merged)}")
+        print(f"    scales[{' | '.join(info)}]  union={len(union)}  after_nms={len(merged)}")
     return merged
 
 
@@ -254,8 +290,9 @@ def run(args, model, processor):
     if not images:
         print(f">>> no images found in {img_dir}")
         return
-    print(f">>> found {len(images)} images; tile={args.tile_size} overlap={args.overlap} "
-          f"nms_iou={args.nms_iou} upscale={args.upscale} max_box_frac={args.max_box_frac}")
+    scales = parse_scales(args.scales, args.tile_size, args.upscale)
+    print(f">>> found {len(images)} images; scales={scales} overlap={args.overlap} "
+          f"nms_iou={args.nms_iou} max_box_frac={args.max_box_frac}")
 
     results = {}
     n_ok = n_fail = n_dets = 0
@@ -263,11 +300,11 @@ def run(args, model, processor):
     for i, path in enumerate(images, 1):
         print(f"[{i}/{len(images)}] {path.name}")
         try:
-            dets = infer_one_tiled(
+            dets = infer_one_multiscale(
                 model, processor, str(path),
-                tile_size=args.tile_size, overlap=args.overlap,
+                scales=scales, overlap=args.overlap,
                 nms_iou=args.nms_iou, max_new_tokens=args.max_new_tokens,
-                upscale=args.upscale, max_box_frac=args.max_box_frac,
+                max_box_frac=args.max_box_frac,
                 debug=args.debug,
             )
             results[path.name] = dets
@@ -282,10 +319,9 @@ def run(args, model, processor):
     payload = {
         "model": args.model,
         "mode": "tiled",
-        "tile_size": args.tile_size,
+        "scales": scales,
         "overlap": args.overlap,
         "nms_iou": args.nms_iou,
-        "upscale": args.upscale,
         "max_box_frac": args.max_box_frac,
         "num_images": len(images),
         "num_ok": n_ok,
@@ -310,15 +346,19 @@ def parse_args():
                    help="local model dir or HuggingFace repo id")
     p.add_argument("--image-dir", required=True, help="folder of images")
     p.add_argument("--out", default="annotations_tiled.json", help="output JSON path")
+    p.add_argument("--scales", type=str, default="640:1.0,512:2.0",
+                   help="multi-scale passes as 'tile:upscale,tile:upscale' "
+                        "(default '640:1.0,512:2.0': coarse pass for medium objects + "
+                        "fine upscaled pass for tiny ones, unioned and NMS-deduped). "
+                        "Set empty '' to use the single --tile-size/--upscale instead.")
     p.add_argument("--tile-size", type=int, default=512,
-                   help="tile edge in px (default 512; smaller = more magnification)")
+                   help="single-scale tile edge in px, used only when --scales is empty")
     p.add_argument("--overlap", type=float, default=0.2,
                    help="fractional tile overlap 0~0.5 (default 0.2)")
     p.add_argument("--nms-iou", type=float, default=0.55,
-                   help="cross-tile dedupe IoU threshold (default 0.55)")
+                   help="cross-tile/cross-scale dedupe IoU threshold (default 0.55)")
     p.add_argument("--upscale", type=float, default=2.0,
-                   help="enlarge each tile by this factor before inference (default 2.0; "
-                        "1.0 disables). Magnifies tiny objects for the model.")
+                   help="single-scale upscale factor, used only when --scales is empty")
     p.add_argument("--max-box-frac", type=float, default=0.5,
                    help="drop boxes larger than this fraction of the tile area "
                         "(default 0.5; kills whole-region mislabels)")
