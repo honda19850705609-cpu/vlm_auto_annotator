@@ -9,6 +9,22 @@ The goal is a **reliable end-to-end link**, not maximum accuracy: load the
 model once, batch over a folder, tolerate per-image failures, and emit one
 aggregated JSON with run-level statistics.
 
+## Key result (VisDrone-DET val, 109 images vs human GT)
+
+Quantifying VLM auto-annotation quality against ground truth, then fixing its
+weakest regime (dense small objects) with multi-scale tiling:
+
+| | integral VLM | **multi-scale tiling** |
+|---|---|---|
+| recall | 0.045 | **0.243** (5.4×) |
+| F1 | 0.082 | **0.336** (4.1×) |
+| precision | 0.538 | **0.544** (flat — no cost) |
+
+The gain is **inversely proportional to object size** (≥96px: 1.5× → 8–16px:
+**20×**) — tiling adds recall exactly where whole-image inference collapses, at
+no precision cost. Full method, the v1→v2→v3 ablation, and honest limits in
+[`devlog/day9.md`](devlog/day9.md); raw reports in [`results/`](results/).
+
 ## Project layout
 
 ```
