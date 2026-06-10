@@ -28,10 +28,29 @@ making it recall-forward lifted recall 0.243 → 0.420. Precision is held near t
 baseline by **structural post-filters** (label whitelist + grid-hallucination
 removal), not by prompt constraints.
 
+### The payoff — distillation: VLM labels → a detector that beats the teacher
+
+The point of auto-annotation is to *replace human labels*. Training a YOLOv8s
+detector on 300 VisDrone-train images labeled **only by the VLM** (zero human
+labels), evaluated on the val 109:
+
+| | VLM teacher | **detector / pseudo** | detector / real (ceiling) |
+|---|---|---|---|
+| F1 | 0.460 | **0.505** | 0.673 |
+| precision | 0.509 | **0.764** | 0.715 |
+| recall | 0.420 | 0.377 | 0.636 |
+| latency | ≈100 s/img | **≈2 ms/img** | ≈2 ms/img |
+
+The distilled detector **beats its VLM teacher** (F1 +10%, precision +50%, ≈10⁴×
+faster) and **denoises** it (trained on P=0.50 pseudo-labels → P=0.76 on real GT).
+With zero human labels it recovers **~75% of the supervised F1**; the remaining
+gap is small-object recall, inherited from the VLM's own recall.
+
 Story in order: [`devlog/day9.md`](devlog/day9.md) (baseline + tiling ablation)
 → [`devlog/day10.md`](devlog/day10.md) (confidence analysis + de-hallucination)
-→ [`devlog/day11.md`](devlog/day11.md) (empty-image prompt fix). Raw reports in
-[`results/`](results/).
+→ [`devlog/day11.md`](devlog/day11.md) (empty-image prompt fix)
+→ [`devlog/day12.md`](devlog/day12.md) (distillation: pseudo-labels → detector).
+Raw reports in [`results/`](results/).
 
 ## Project layout
 
@@ -42,15 +61,20 @@ vlm_auto_annotator/
 ├── to_coco.py          # Day 6 — convert batch JSON to COCO (pycocotools-verified)
 ├── badcase.py          # Day 9 — GT-anchored eval: P/R/F1 + per-size recall + badcase ranking
 ├── tiled_vlm.py        # Day 11 — multi-scale tiling inference (beats the token ceiling)
+├── analyze_confidence.py # Day 10 — confidence-threshold PR sweep
+├── dehallucinate.py    # Day 10 — drop grid-hallucination FPs (precision filter)
+├── diag_tile.py        # Day 11 — isolate empty-tile cause (prompt vs tiling)
+├── coco_to_yolo.py     # Day 12 — pseudo/real COCO -> YOLO training format
+├── yolo_to_coco.py     # Day 12 — trained-YOLO predictions -> COCO for badcase
 ├── requirements.txt
-├── results/            # full-val eval reports (integral baseline vs tiled v3)
+├── results/            # full-val eval reports (integral / tiled / refinements / distill)
 ├── devlog/             # daily notes (environment, bugs, design decisions)
-│   ├── day1_2026-06-05.md
-│   ├── day2.md
-│   ├── day3.md         # DINO-DETR / ONNX track (separate small-model path)
-│   ├── day4.md
-│   ├── day6.md         # end-to-end VLM -> COCO closure
-│   └── day9.md         # GT-anchored badcase + tiling improvement (v1/v2/v3 ablation)
+│   ├── day1_2026-06-05.md … day6.md   # setup → end-to-end VLM→COCO
+│   ├── day9.md         # GT-anchored badcase + tiling ablation (v1/v2/v3)
+│   ├── day10.md        # confidence analysis + de-hallucination
+│   ├── day11.md        # empty-image prompt fix (recall 0.243→0.420)
+│   ├── day12.md        # distillation: pseudo-labels → detector
+│   └── distill_runbook.md   # full 5090 distillation pipeline
 └── README.md
 ```
 
@@ -63,6 +87,9 @@ Scripts build on each other:
 | `to_coco.py` | Convert the batch JSON to a standard COCO detection file; verify it loads with `pycocotools` |
 | `badcase.py` | Score VLM pseudo-labels against ground truth (file-name aligned, label-normalized, greedy IoU): overall/per-class P/R/F1, **recall split by object size**, ranked bad-case image list |
 | `tiled_vlm.py` | Multi-scale tiling inference: split each image into overlapping tiles (optionally upscaled), detect per tile, map boxes back to global coords, cross-tile NMS — recovers small-object recall that whole-image inference loses |
+| `dehallucinate.py` | Drop evenly-spaced grid-hallucination boxes (a structural precision filter; COCO in/out) |
+| `analyze_confidence.py` | Sweep the VLM confidence threshold → PR curve + best operating point |
+| `coco_to_yolo.py` / `yolo_to_coco.py` | Distillation bridge: pseudo/real COCO → YOLO training set; trained detector → COCO for `badcase.py` |
 
 Use **`structured_vlm.py`** for production-style auto-annotation, then
 **`to_coco.py`** to hand the result to downstream COCO tooling. `minimal_vlm.py`
