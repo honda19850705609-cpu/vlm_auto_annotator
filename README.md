@@ -12,18 +12,26 @@ aggregated JSON with run-level statistics.
 ## Key result (VisDrone-DET val, 109 images vs human GT)
 
 Quantifying VLM auto-annotation quality against ground truth, then fixing its
-weakest regime (dense small objects) with multi-scale tiling:
+weakest regime (dense small objects) with multi-scale tiling + targeted fixes:
 
-| | integral VLM | **multi-scale tiling** |
+| | integral VLM | **tiling + empty-fix + de-hall** |
 |---|---|---|
-| recall | 0.045 | **0.243** (5.4×) |
-| F1 | 0.082 | **0.336** (4.1×) |
-| precision | 0.538 | **0.544** (flat — no cost) |
+| recall | 0.045 | **0.420** (9.3×) |
+| F1 | 0.082 | **0.460** (5.6×) |
+| precision | 0.538 | 0.509 (≈ baseline) |
 
-The gain is **inversely proportional to object size** (≥96px: 1.5× → 8–16px:
-**20×**) — tiling adds recall exactly where whole-image inference collapses, at
-no precision cost. Full method, the v1→v2→v3 ablation, and honest limits in
-[`devlog/day9.md`](devlog/day9.md); raw reports in [`results/`](results/).
+Recall by object size climbs **0.075 → 0.187 → 0.404 → 0.692 → 0.859** (from
+<8px to ≥96px) — tiling adds recall exactly where whole-image inference
+collapses. The single biggest lever was a **prompt fix**: an over-constrained
+prompt was returning `[]` on low-res frames (23/109 images, 11.5% of GT);
+making it recall-forward lifted recall 0.243 → 0.420. Precision is held near the
+baseline by **structural post-filters** (label whitelist + grid-hallucination
+removal), not by prompt constraints.
+
+Story in order: [`devlog/day9.md`](devlog/day9.md) (baseline + tiling ablation)
+→ [`devlog/day10.md`](devlog/day10.md) (confidence analysis + de-hallucination)
+→ [`devlog/day11.md`](devlog/day11.md) (empty-image prompt fix). Raw reports in
+[`results/`](results/).
 
 ## Project layout
 
