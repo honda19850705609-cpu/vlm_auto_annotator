@@ -32,25 +32,29 @@ removal), not by prompt constraints.
 
 The point of auto-annotation is to *replace human labels*. Training a YOLOv8s
 detector on 300 VisDrone-train images labeled **only by the VLM** (zero human
-labels), evaluated on the val 109:
+labels), then closing the gap with one round of SAHI tiled self-training —
+evaluated on the val 109:
 
-| | VLM teacher | **detector / pseudo** | detector / real (ceiling) |
-|---|---|---|---|
-| F1 | 0.460 | **0.505** | 0.673 |
-| precision | 0.509 | **0.764** | 0.715 |
-| recall | 0.420 | 0.377 | 0.636 |
-| latency | ≈100 s/img | **≈2 ms/img** | ≈2 ms/img |
+| | VLM teacher | detector D0 (pseudo) | **D1 (self-train)** | real (ceiling) |
+|---|---|---|---|---|
+| F1 | 0.460 | 0.505 | **0.535** | 0.673 |
+| precision | 0.509 | 0.764 | 0.608 | 0.715 |
+| recall | 0.420 | 0.377 | **0.477** | 0.636 |
+| latency | ≈100 s/img | ≈2 ms/img | ≈2 ms/img | ≈2 ms/img |
 
 The distilled detector **beats its VLM teacher** (F1 +10%, precision +50%, ≈10⁴×
-faster) and **denoises** it (trained on P=0.50 pseudo-labels → P=0.76 on real GT).
-With zero human labels it recovers **~75% of the supervised F1**; the remaining
-gap is small-object recall, inherited from the VLM's own recall.
+faster) and **denoises** it (trained on P=0.50 labels → P=0.76 on real GT). Its
+only weakness — small-object recall — is a *missing-label* problem (the VLM never
+labeled those objects, so they act as negative supervision); **SAHI tiled
+self-relabeling** completes the labels and recovers it: recall +27%, small-object
+recall ~2×, F1 to **~80% of the human ceiling — all with zero human labels.**
 
 Story in order: [`devlog/day9.md`](devlog/day9.md) (baseline + tiling ablation)
 → [`devlog/day10.md`](devlog/day10.md) (confidence analysis + de-hallucination)
 → [`devlog/day11.md`](devlog/day11.md) (empty-image prompt fix)
-→ [`devlog/day12.md`](devlog/day12.md) (distillation: pseudo-labels → detector).
-Raw reports in [`results/`](results/).
+→ [`devlog/day12.md`](devlog/day12.md) (distillation: pseudo-labels → detector)
+→ [`devlog/day13.md`](devlog/day13.md) (SAHI tiled self-training). Raw reports in
+[`results/`](results/).
 
 ## Project layout
 
