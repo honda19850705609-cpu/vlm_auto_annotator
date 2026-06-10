@@ -60,21 +60,24 @@ from structured_vlm import (
 # 巨大的 "pedestrian/car"、还编出等距的竖列假框。这里从源头掐住。
 # ---------------------------------------------------------------------------
 VISDRONE_PROMPT = (
-    "This is an aerial / drone-view image. Detect EVERY individual small object. "
-    "Use ONLY these exact labels: "
-    "pedestrian, person, car, van, truck, bus, bicycle, tricycle, motor. "
-    "Do NOT label scenery such as building, road, street, tree, sky, parking lot, "
-    "billboard — ignore them completely. "
-    "Each bounding box must tightly enclose exactly ONE object. "
-    "Do NOT merge several objects into one big box. "
-    "Do NOT invent evenly-spaced or repeated boxes. "
+    "Detect every distinct object in this aerial / drone-view image, "
+    "including small, distant, and partially-occluded ones — be exhaustive. "
+    "Label each object with the closest of these types: "
+    "pedestrian, car, van, truck, bus, bicycle, tricycle, motor. "
+    "Output objects only (skip pure background like buildings, roads, trees). "
+    "Use one tight box per object: do not merge several objects into one box, "
+    "and do not output rows of identical, evenly-spaced boxes. "
     "Respond with ONLY a JSON array, no prose, no markdown fences. "
     "Each element: "
-    '{"label": one of the allowed labels, '
+    '{"label": one of the types above, '
     '"bbox": [x1, y1, x2, y2] in absolute pixel integers, '
-    '"confidence": 0.0-1.0}. '
-    "If you see no such object, respond with []."
+    '"confidence": 0.0-1.0}.'
 )
+# NOTE (Day 11 fix): the previous prompt led with "EVERY individual SMALL object"
+# + heavy "Do NOT…" + "if none, respond []", which made the model return [] on
+# LOW-RES frames (e.g. 540×960) where objects don't look "small" — that emptied
+# 23/109 val images (11.5% of GT). Recall-forward wording fixes it; scenery/grid
+# noise is caught downstream by normalize_label (whitelist) + dehallucinate.py.
 
 # 即使模型不听话,也用白名单兜底过滤掉非目标类(含简单的复数归一)。
 ALLOWED_LABELS = {
