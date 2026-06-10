@@ -68,10 +68,21 @@ def _nms_per_class(dets, iou_thr=0.5):
     return out
 
 
-def predict_tiled(model, pil_img, tile, overlap, imgsz, conf):
-    """SAHI:切图逐块推理 → 拼回全图坐标 → 跨块 NMS。返回 (cls,x1,y1,x2,y2,conf) 列表。"""
+def predict_tiled(model, pil_img, tile, overlap, imgsz, conf, full_image=True):
+    """SAHI:切块推理(捞小目标)+ 整图推理(保大目标)融合 → 跨块 NMS。
+
+    full_image=True 时把整图那遍的框也并进来,避免切块切断大目标导致大目标召回下降。
+    返回 (cls,x1,y1,x2,y2,conf) 列表。
+    """
     W, H = pil_img.size
     dets = []
+    # 整图一遍:保住大/中目标
+    if full_image:
+        r = model.predict(pil_img, conf=conf, imgsz=imgsz, verbose=False)[0]
+        for b in r.boxes:
+            x1, y1, x2, y2 = [float(v) for v in b.xyxy[0]]
+            dets.append((int(b.cls), x1, y1, x2, y2, float(b.conf)))
+    # 切块若干遍:捞小目标
     for (x0, y0, x1, y1) in _make_tiles(W, H, tile, overlap):
         crop = pil_img.crop((x0, y0, x1, y1))
         r = model.predict(crop, conf=conf, imgsz=imgsz, verbose=False)[0]
