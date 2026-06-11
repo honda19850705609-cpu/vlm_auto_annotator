@@ -62,7 +62,7 @@ def xyxy_to_xywh(bbox):
     return [round(x_min, 2), round(y_min, 2), round(w, 2), round(h, 2)], w * h
 
 
-def convert(in_path, images_dir, out_path):
+def convert(in_path, images_dir, out_path, box_scale=1.0):
     with open(in_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -97,7 +97,10 @@ def convert(in_path, images_dir, out_path):
         })
 
         for d in annotations[fname]:
-            bbox_xywh, area = xyxy_to_xywh(d["bbox"])
+            bb = d["bbox"]
+            if box_scale != 1.0:   # SR 坐标系 -> 原图坐标系
+                bb = [v * box_scale for v in bb]
+            bbox_xywh, area = xyxy_to_xywh(bb)
             coco_anns.append({
                 "id": ann_id,
                 "image_id": image_id,
@@ -155,9 +158,11 @@ if __name__ == "__main__":
     ap.add_argument("--in", dest="in_path", required=True, help="annotations.json 路径")
     ap.add_argument("--images", required=True, help="images/ 文件夹路径")
     ap.add_argument("--out", default="coco.json", help="输出 COCO json 路径")
+    ap.add_argument("--box-scale", type=float, default=1.0,
+                    help="把 bbox 坐标乘以此系数(SR 流程:用 1/放大倍数 缩回原图,如 2× SR 填 0.5)")
     ap.add_argument("--verify", action="store_true", help="转换后用 pycocotools 验证")
     args = ap.parse_args()
 
-    out = convert(args.in_path, args.images, args.out)
+    out = convert(args.in_path, args.images, args.out, box_scale=args.box_scale)
     if args.verify:
         verify(out)
